@@ -1,4 +1,237 @@
-mkdir painel-credito
-cd painel-credito
-npm init -y
-npm install express bcryptjs jsonwebtoken
+const express = require('express');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+
+const app = express();
+app.use(express.json());
+
+const JWT_SECRET = 'sua_chave_secreta_super_segura';
+
+// --- BANCO DE DADOS EM MEMÓRIA (Para testes rápidos) ---
+const bancoDados = {
+  usuarios: [], // Guarda admins e clientes
+  emprestimos: []
+};
+
+// Criar um Admin padrão ao iniciar o sistema
+(async () => {
+  const senhaHash = await bcrypt.hash('admin123', 10);
+  bancoDados.usuarios.push({
+    id: 1,
+    nome: 'Administrador',
+    email: 'admin@sistema.com',
+    senha_hash: senhaHash,
+    role: 'admin'
+  });
+  console.log('✅ Usuário Admin criado: admin@sistema.com | Senha: admin123');
+})();
+
+// --- MIDDLEWARE DE AUTENTICAÇÃO ---
+function autenticarToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  
+  if (!token) return res.status(401).json({ error: 'Acesso negado' });
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ error: 'Token inválido' });
+    req.user = user;
+    next();
+  });
+}
+
+// --- ROTAS DA API ---
+
+// Rota de Login
+app.post('/api/login', async (req, res) => {
+  const { email, senha } = req.body;
+  const usuario = bancoDados.usuarios.find(u => u.email === email);
+
+  if (!usuario) return res.status(400).json({ error: 'Usuário não encontrado' });
+
+  const senhaValida = await bcrypt.compare(senha, usuario.senha_hash);
+  if (!senhaValida) return res.status(400).json({ error: 'Senha incorreta' });
+
+  const token = jwt.sign(
+    { id: usuario.id, nome: usuario.nome, role: usuario.role },
+    JWT_SECRET,
+    { expiresIn: '8h' }
+  );
+
+  res.json({ token, role: usuario.role, nome: usuario.nome });
+});
+
+// Rota para o Admin criar novos Clientes com Login
+app.post('/api/admin/criar-cliente', autenticarToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Acesso restrito a Administradores' });
+  }
+
+  const { nome, email, senha } = req.body;
+
+  const usuarioExiste = bancoDados.usuarios.find(u => u.email === email);
+  if (usuarioExiste) return res.status(400).json({ error: 'Email já cadastrado' });
+
+  const senhaHash = await bcrypt.hash(senha, 10);
+  const novoCliente = {
+    id: bancoDados.usuarios.length + 1,
+    nome,
+    email,
+    senha_hash: senhaHash,
+    role: 'cliente'
+  };
+
+  bancoDados.usuarios.push(novoCliente);
+  res.status(201).json({ message: 'Cliente criado com sucesso!', cliente: { id: novoCliente.id, nome, email } });
+});
+
+// Rota para listar clientes cadastrados (Apenas Admin)
+app.get('/api/admin/clientes', autenticarToken, (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Acesso restrito' });
+  
+  const clientes = bancoDados.usuarios
+    .filter(u => u.role === 'cliente')
+    .map(u => ({ id: u.id, nome: u.nome, email: u.email }));
+
+  res.json(clientes);
+});
+
+// --- PAINEL VISUAL (HTML INTERNO) ---
+app.get('/', (req, res) => {
+  res.send(`
+  <!DOCTYPE html>
+  <html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Painel de Gestão de Crédito</title>
+    <style>
+      body { font-family: Arial, sans-serif; background: #f4f7f6; margin: 0; padding: 20px; }
+      .card { background: white; padding: 20px; border-radius: 8px; max-width: 500px; margin: 20px auto; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+      h2 { color: #333; margin-top: 0; }
+      input, button { width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+      button { background: #28a745; color: white; border: none; font-weight: bold; cursor: pointer; }
+      button:hover { background: #218838; }
+      .oculto { display: none; }
+      ul { padding-left: 20px; }
+    </style>
+  </head>
+  <body>
+
+    <!-- TELA DE LOGIN -->
+    <div id="tela-login" class="card">
+      <h2>Acesso ao Sistema</h2>
+      <input type="email" id="login-email" placeholder="E-mail" value="admin@sistema.com">
+      <input type="password" id="login-senha" placeholder="Senha" value="admin123">
+      <button onclick="fazerLogin()">Entrar</button>
+      <p id="msg-login" style="color:red;"></p>
+    </div>
+
+    <!-- PAINEL DO ADMIN -->
+    <div id="tela-admin" class="card oculto">
+      <h2>Painel Administrativo</h2>
+      <p>Bem-vindo, <b id="nome-admin"></b>!</p>
+      
+      <h3>Cadastrar Novo Cliente</h3>
+      <input type="text" id="cli-nome" placeholder="Nome do Cliente">
+      <input type="email" id="cli-email" placeholder="E-mail do Cliente">
+      <input type="password" id="cli-senha" placeholder="Senha do Cliente">
+      <button onclick="cadastrarCliente()">Criar Acesso</button>
+
+      <h3>Clientes Cadastrados</h3>
+      <ul id="lista-clientes"></ul>
+
+      <button onclick="sair()" style="background:#dc3545;">Sair</button>
+    </div>
+
+    <!-- PAINEL DO CLIENTE -->
+    <div id="tela-cliente" class="card oculto">
+      <h2>Área do Cliente</h2>
+      <p>Bem-vindo, <b id="nome-cliente"></b>!</p>
+      <p>Você está logado no seu painel de acompanhamento de débitos.</p>
+      <button onclick="sair()" style="background:#dc3545;">Sair</button>
+    </div>
+
+    <script>
+      let token = '';
+
+      async function fazerLogin() {
+        const email = document.getElementById('login-email').value;
+        const senha = document.getElementById('login-senha').value;
+
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, senha })
+        });
+
+        const data = await res.json();
+        if (res.ok) {
+          token = data.token;
+          document.getElementById('tela-login').classList.add('oculto');
+          
+          if (data.role === 'admin') {
+            document.getElementById('nome-admin').innerText = data.nome;
+            document.getElementById('tela-admin').classList.remove('oculto');
+            carregarClientes();
+          } else {
+            document.getElementById('nome-cliente').innerText = data.nome;
+            document.getElementById('tela-cliente').classList.remove('oculto');
+          }
+        } else {
+          document.getElementById('msg-login').innerText = data.error;
+        }
+      }
+
+      async function cadastrarCliente() {
+        const nome = document.getElementById('cli-nome').value;
+        const email = document.getElementById('cli-email').value;
+        const senha = document.getElementById('cli-senha').value;
+
+        const res = await fetch('/api/admin/criar-cliente', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + token
+          },
+          body: JSON.stringify({ nome, email, senha })
+        });
+
+        const data = await res.json();
+        alert(data.message || data.error);
+        if (res.ok) {
+          document.getElementById('cli-nome').value = '';
+          document.getElementById('cli-email').value = '';
+          document.getElementById('cli-senha').value = '';
+          carregarClientes();
+        }
+      }
+
+      async function carregarClientes() {
+        const res = await fetch('/api/admin/clientes', {
+          headers: { 'Authorization': 'Bearer ' + token }
+        });
+        const clientes = await res.json();
+        
+        const lista = document.getElementById('lista-clientes');
+        lista.innerHTML = '';
+        clientes.forEach(c => {
+          lista.innerHTML += \`<li>\${c.nome} (\${c.email})</li>\`;
+        });
+      }
+
+      function sair() {
+        token = '';
+        document.getElementById('tela-admin').classList.add('oculto');
+        document.getElementById('tela-cliente').classList.add('oculto');
+        document.getElementById('tela-login').classList.remove('oculto');
+      }
+    </script>
+  </body>
+  </html>
+  `);
+});
+
+app.listen(3000, () => {
+  console.log('🚀 Servidor rodando em http://localhost:3000');
+});
