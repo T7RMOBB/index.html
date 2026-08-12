@@ -7,13 +7,13 @@ app.use(express.json());
 
 const JWT_SECRET = 'sua_chave_secreta_super_segura';
 
-// --- BANCO DE DADOS EM MEMÓRIA (Para testes rápidos) ---
+// --- BANCO DE DADOS EM MEMÓRIA ---
 const bancoDados = {
-  usuarios: [], // Guarda admins e clientes
+  usuarios: [],
   emprestimos: []
 };
 
-// Criar um Admin padrão ao iniciar o sistema
+// Admin Padrão
 (async () => {
   const senhaHash = await bcrypt.hash('admin123', 10);
   bancoDados.usuarios.push({
@@ -23,7 +23,7 @@ const bancoDados = {
     senha_hash: senhaHash,
     role: 'admin'
   });
-  console.log('✅ Usuário Admin criado: admin@sistema.com | Senha: admin123');
+  console.log('✅ Admin pronto: admin@sistema.com | Senha: admin123');
 })();
 
 // --- MIDDLEWARE DE AUTENTICAÇÃO ---
@@ -42,7 +42,7 @@ function autenticarToken(req, res, next) {
 
 // --- ROTAS DA API ---
 
-// Rota de Login
+// 1. Login
 app.post('/api/login', async (req, res) => {
   const { email, senha } = req.body;
   const usuario = bancoDados.usuarios.find(u => u.email === email);
@@ -58,45 +58,92 @@ app.post('/api/login', async (req, res) => {
     { expiresIn: '8h' }
   );
 
-  res.json({ token, role: usuario.role, nome: usuario.nome });
+  res.json({ token, role: usuario.role, nome: usuario.nome, id: usuario.id });
 });
 
-// Rota para o Admin criar novos Clientes com Login
-app.post('/api/admin/criar-cliente', autenticarToken, async (req, res) => {
+// 2. Criar Cliente e Empréstimo
+app.post('/api/admin/criar-emprestimo', autenticarToken, async (req, res) => {
   if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Acesso restrito a Administradores' });
+    return res.status(403).json({ error: 'Acesso restrito ao Admin' });
   }
 
-  const { nome, email, senha } = req.body;
+  const { nome, email, senha, telefone, endereco, valor, taxaJuros, dias, dataInicio } = req.body;
 
-  const usuarioExiste = bancoDados.usuarios.find(u => u.email === email);
-  if (usuarioExiste) return res.status(400).json({ error: 'Email já cadastrado' });
+  // Criar ou localizar o login do cliente
+  let usuario = bancoDados.usuarios.find(u => u.email === email);
+  if (!usuario) {
+    const senhaHash = await bcrypt.hash(senha, 10);
+    usuario = {
+      id: bancoDados.usuarios.length + 1,
+      nome,
+      email,
+      senha_hash: senhaHash,
+      role: 'cliente',
+      telefone,
+      endereco
+    };
+    bancoDados.usuarios.push(usuario);
+  }
 
-  const senhaHash = await bcrypt.hash(senha, 10);
-  const novoCliente = {
-    id: bancoDados.usuarios.length + 1,
-    nome,
-    email,
-    senha_hash: senhaHash,
-    role: 'cliente'
+  // Cálculos Financeiros
+  const valorNum = parseFloat(valor);
+  const taxaNum = parseFloat(taxaJuros);
+  const diasNum = parseInt(dias);
+
+  const valorJuros = valorNum * (taxaNum / 100);
+  const valorTotal = valorNum + valorJuros;
+  const valorDiaria = valorTotal / diasNum;
+
+  // Cálculo da Data Final
+  const inicio = new Date(dataInicio);
+  const dataFinal = new Date(inicio);
+  dataFinal.setDate(inicio.getDate() + diasNum);
+
+  const novoEmprestimo = {
+    id: bancoDados.emprestimos.length + 1,
+    clienteId: usuario.id,
+    valorEmpresado: valorNum,
+    taxaJuros: taxaNum,
+    valorTotal,
+    valorDiaria,
+    diasTotal: diasNum,
+    dataInicio,
+    dataFinal: dataFinal.toISOString().split('T')[0],
+    status: 'Ativo'
   };
 
-  bancoDados.usuarios.push(novoCliente);
-  res.status(201).json({ message: 'Cliente criado com sucesso!', cliente: { id: novoCliente.id, nome, email } });
+  bancoDados.emprestimos.push(novoEmprestimo);
+
+  res.status(201).json({
+    message: 'Empréstimo cadastrado com sucesso!',
+    emprestimo: novoEmprestimo
+  });
 });
 
-// Rota para listar clientes cadastrados (Apenas Admin)
-app.get('/api/admin/clientes', autenticarToken, (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Acesso restrito' });
-  
-  const clientes = bancoDados.usuarios
-    .filter(u => u.role === 'cliente')
-    .map(u => ({ id: u.id, nome: u.nome, email: u.email }));
+// 3. Listar todos os Empréstimos (Admin)
+app.get('/api/admin/emprestimos', autenticarToken, (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Acesso negado' });
 
-  res.json(clientes);
+  const lista = bancoDados.emprestimos.map(e => {
+    const cliente = bancoDados.usuarios.find(u => u.id === e.clienteId);
+    return {
+      ...e,
+      clienteNome: cliente ? cliente.nome : 'N/A',
+      clienteTelefone: cliente ? cliente.telefone : 'N/A',
+      clienteEndereco: cliente ? cliente.endereco : 'N/A'
+    };
+  });
+
+  res.json(lista);
 });
 
-// --- PAINEL VISUAL (HTML INTERNO) ---
+// 4. Ver Empréstimos do Cliente Logado
+app.get('/api/cliente/meus-emprestimos', autenticarToken, (req, res) => {
+  const meusEmprestimos = bancoDados.emprestimos.filter(e => e.clienteId === req.user.id);
+  res.json(meusEmprestimos);
+});
+
+// --- INTERFACE VISUAL (HTML) ---
 app.get('/', (req, res) => {
   res.send(`
   <!DOCTYPE html>
@@ -104,56 +151,115 @@ app.get('/', (req, res) => {
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Painel de Gestão de Crédito</title>
+    <title>Sistema de Gestão de Crédito</title>
     <style>
-      body { font-family: Arial, sans-serif; background: #f4f7f6; margin: 0; padding: 20px; }
-      .card { background: white; padding: 20px; border-radius: 8px; max-width: 500px; margin: 20px auto; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-      h2 { color: #333; margin-top: 0; }
-      input, button { width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
-      button { background: #28a745; color: white; border: none; font-weight: bold; cursor: pointer; }
-      button:hover { background: #218838; }
+      body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #eef2f5; margin: 0; padding: 20px; }
+      .container { max-width: 800px; margin: 0 auto; }
+      .card { background: white; padding: 25px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+      h2, h3 { color: #2c3e50; margin-top: 0; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      input, button { width: 100%; padding: 10px; margin: 6px 0; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; }
+      button { background: #27ae60; color: white; border: none; font-weight: bold; cursor: pointer; transition: 0.2s; }
+      button:hover { background: #219150; }
       .oculto { display: none; }
-      ul { padding-left: 20px; }
+      .resumo-box { background: #f8f9fa; border-left: 4px solid #27ae60; padding: 12px; margin: 10px 0; }
+      table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+      th, td { border: 1px solid #ddd; padding: 10px; text-align: left; font-size: 14px; }
+      th { background-color: #2c3e50; color: white; }
     </style>
   </head>
   <body>
+    <div class="container">
 
-    <!-- TELA DE LOGIN -->
-    <div id="tela-login" class="card">
-      <h2>Acesso ao Sistema</h2>
-      <input type="email" id="login-email" placeholder="E-mail" value="admin@sistema.com">
-      <input type="password" id="login-senha" placeholder="Senha" value="admin123">
-      <button onclick="fazerLogin()">Entrar</button>
-      <p id="msg-login" style="color:red;"></p>
-    </div>
+      <!-- TELA DE LOGIN -->
+      <div id="tela-login" class="card">
+        <h2>🔑 Login no Sistema</h2>
+        <input type="email" id="login-email" placeholder="E-mail" value="admin@sistema.com">
+        <input type="password" id="login-senha" placeholder="Senha" value="admin123">
+        <button onclick="fazerLogin()">Entrar</button>
+        <p id="msg-login" style="color:red;"></p>
+      </div>
 
-    <!-- PAINEL DO ADMIN -->
-    <div id="tela-admin" class="card oculto">
-      <h2>Painel Administrativo</h2>
-      <p>Bem-vindo, <b id="nome-admin"></b>!</p>
-      
-      <h3>Cadastrar Novo Cliente</h3>
-      <input type="text" id="cli-nome" placeholder="Nome do Cliente">
-      <input type="email" id="cli-email" placeholder="E-mail do Cliente">
-      <input type="password" id="cli-senha" placeholder="Senha do Cliente">
-      <button onclick="cadastrarCliente()">Criar Acesso</button>
+      <!-- PAINEL ADMINISTRATIVO -->
+      <div id="tela-admin" class="card oculto">
+        <h2>📋 Painel do Administrador</h2>
+        <p>Usuário: <b id="nome-admin"></b></p>
+        
+        <div class="card" style="background:#fdfdfd; border:1px solid #eee;">
+          <h3>➕ Novo Empréstimo / Cliente</h3>
+          
+          <b>Dados Pessoais</b>
+          <div class="grid">
+            <input type="text" id="cli-nome" placeholder="Nome Completo">
+            <input type="text" id="cli-telefone" placeholder="Telefone / WhatsApp">
+          </div>
+          <input type="text" id="cli-endereco" placeholder="Endereço Completo">
+          
+          <div class="grid">
+            <input type="email" id="cli-email" placeholder="E-mail (para login)">
+            <input type="password" id="cli-senha" placeholder="Senha de Acesso">
+          </div>
 
-      <h3>Clientes Cadastrados</h3>
-      <ul id="lista-clientes"></ul>
+          <b style="display:block; margin-top:10px;">Dados Financeiros</b>
+          <div class="grid">
+            <input type="number" id="emp-valor" placeholder="Valor Emprestado (R$)" oninput="calcularPrévia()">
+            <input type="number" id="emp-taxa" placeholder="Taxa de Juros (%)" oninput="calcularPrévia()">
+          </div>
+          <div class="grid">
+            <input type="number" id="emp-dias" placeholder="Qtd. Dias para Pagamento" oninput="calcularPrévia()">
+            <input type="date" id="emp-inicio" onchange="calcularPrévia()">
+          </div>
 
-      <button onclick="sair()" style="background:#dc3545;">Sair</button>
-    </div>
+          <!-- PRÉVIA DOS CÁLCULOS -->
+          <div id="previa-calculos" class="resumo-box oculto">
+            <p><b>Resumo do Cálculo:</b></p>
+            <span>Total a Pagar: <b>R$ <span id="prev-total">0.00</span></b></span> | 
+            <span>Diária: <b>R$ <span id="prev-diaria">0.00</span></b></span><br>
+            <span>Data Final de Quitação: <b><span id="prev-datafinal">-</span></b></span>
+          </div>
 
-    <!-- PAINEL DO CLIENTE -->
-    <div id="tela-cliente" class="card oculto">
-      <h2>Área do Cliente</h2>
-      <p>Bem-vindo, <b id="nome-cliente"></b>!</p>
-      <p>Você está logado no seu painel de acompanhamento de débitos.</p>
-      <button onclick="sair()" style="background:#dc3545;">Sair</button>
+          <button onclick="cadastrarEmprestimo()" style="margin-top:15px;">Cadastrar Empréstimo</button>
+        </div>
+
+        <h3>📋 Todos os Empréstimos Cadastrados</h3>
+        <div style="overflow-x:auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Cliente</th>
+                <th>Telefone</th>
+                <th>Valor Pego</th>
+                <th>Total (+Juros)</th>
+                <th>Diária</th>
+                <th>Início</th>
+                <th>Vencimento</th>
+              </tr>
+            </thead>
+            <tbody id="tabela-emprestimos"></tbody>
+          </table>
+        </div>
+
+        <button onclick="sair()" style="background:#e74c3c; margin-top:20px;">Sair</button>
+      </div>
+
+      <!-- PAINEL DO CLIENTE -->
+      <div id="tela-cliente" class="card oculto">
+        <h2>👤 Área do Cliente</h2>
+        <p>Olá, <b id="nome-cliente"></b>!</p>
+
+        <h3>Meus Empréstimos</h3>
+        <div id="cards-cliente"></div>
+
+        <button onclick="sair()" style="background:#e74c3c; margin-top:20px;">Sair</button>
+      </div>
+
     </div>
 
     <script>
       let token = '';
+
+      // Define data atual no campo de início
+      document.getElementById('emp-inicio').valueAsDate = new Date();
 
       async function fazerLogin() {
         const email = document.getElementById('login-email').value;
@@ -169,54 +275,117 @@ app.get('/', (req, res) => {
         if (res.ok) {
           token = data.token;
           document.getElementById('tela-login').classList.add('oculto');
-          
+
           if (data.role === 'admin') {
             document.getElementById('nome-admin').innerText = data.nome;
             document.getElementById('tela-admin').classList.remove('oculto');
-            carregarClientes();
+            carregarTabelaAdmin();
           } else {
             document.getElementById('nome-cliente').innerText = data.nome;
             document.getElementById('tela-cliente').classList.remove('oculto');
+            carregarEmprestimosCliente();
           }
         } else {
           document.getElementById('msg-login').innerText = data.error;
         }
       }
 
-      async function cadastrarCliente() {
-        const nome = document.getElementById('cli-nome').value;
-        const email = document.getElementById('cli-email').value;
-        const senha = document.getElementById('cli-senha').value;
+      function calcularPrévia() {
+        const valor = parseFloat(document.getElementById('emp-valor').value) || 0;
+        const taxa = parseFloat(document.getElementById('emp-taxa').value) || 0;
+        const dias = parseInt(document.getElementById('emp-dias').value) || 0;
+        const dataInicioStr = document.getElementById('emp-inicio').value;
 
-        const res = await fetch('/api/admin/criar-cliente', {
+        if (valor > 0 && dias > 0 && dataInicioStr) {
+          const valorTotal = valor + (valor * (taxa / 100));
+          const valorDiaria = valorTotal / dias;
+
+          const dataInicio = new Date(dataInicioStr);
+          const dataFinal = new Date(dataInicio);
+          dataFinal.setDate(dataInicio.getDate() + dias);
+
+          document.getElementById('prev-total').innerText = valorTotal.toFixed(2);
+          document.getElementById('prev-diaria').innerText = valorDiaria.toFixed(2);
+          document.getElementById('prev-datafinal').innerText = dataFinal.toISOString().split('T')[0];
+
+          document.getElementById('previa-calculos').classList.remove('oculto');
+        } else {
+          document.getElementById('previa-calculos').classList.add('oculto');
+        }
+      }
+
+      async function cadastrarEmprestimo() {
+        const body = {
+          nome: document.getElementById('cli-nome').value,
+          telefone: document.getElementById('cli-telefone').value,
+          endereco: document.getElementById('cli-endereco').value,
+          email: document.getElementById('cli-email').value,
+          senha: document.getElementById('cli-senha').value,
+          valor: document.getElementById('emp-valor').value,
+          taxaJuros: document.getElementById('emp-taxa').value,
+          dias: document.getElementById('emp-dias').value,
+          dataInicio: document.getElementById('emp-inicio').value
+        };
+
+        const res = await fetch('/api/admin/criar-emprestimo', {
           method: 'POST',
           headers: { 
             'Content-Type': 'application/json',
-            'Authorization': 'Bearer ' + token
+            'Authorization': 'Bearer ' + token 
           },
-          body: JSON.stringify({ nome, email, senha })
+          body: JSON.stringify(body)
         });
 
         const data = await res.json();
         alert(data.message || data.error);
         if (res.ok) {
-          document.getElementById('cli-nome').value = '';
-          document.getElementById('cli-email').value = '';
-          document.getElementById('cli-senha').value = '';
-          carregarClientes();
+          carregarTabelaAdmin();
         }
       }
 
-      async function carregarClientes() {
-        const res = await fetch('/api/admin/clientes', {
+      async function carregarTabelaAdmin() {
+        const res = await fetch('/api/admin/emprestimos', {
           headers: { 'Authorization': 'Bearer ' + token }
         });
-        const clientes = await res.json();
-        
-        const lista = document.getElementById('lista-clientes');
-        lista.innerHTML = '';
-        clientes.forEach(c => {
-          lista.innerHTML += \`<li>\${c.nome} (\${c.email})</li>\`;
+        const lista = await res.json();
+
+        const tbody = document.getElementById('tabela-emprestimos');
+        tbody.innerHTML = '';
+
+        lista.forEach(item => {
+          tbody.innerHTML += \`
+            <tr>
+              <td><b>\${item.clienteNome}</b><br><small>\${item.clienteEndereco}</small></td>
+              <td>\${item.clienteTelefone}</td>
+              <td>R$ \${item.valorEmpresado.toFixed(2)}</td>
+              <td><b>R$ \${item.valorTotal.toFixed(2)}</b> (\${item.taxaJuros}%)</td>
+              <td style="color:#27ae60; font-weight:bold;">R$ \${item.valorDiaria.toFixed(2)}</td>
+              <td>\${item.dataInicio}</td>
+              <td style="color:#e74c3c; font-weight:bold;">\${item.dataFinal}</td>
+            </tr>
+          \`;
+        });
+      }
+
+      async function carregarEmprestimosCliente() {
+        const res = await fetch('/api/cliente/meus-emprestimos', {
+          headers: { 'Authorization': 'Bearer ' + token }
+        });
+        const lista = await res.json();
+
+        const container = document.getElementById('cards-cliente');
+        container.innerHTML = '';
+
+        lista.forEach(e => {
+          container.innerHTML += \`
+            <div class="resumo-box">
+              <p><b>Valor Contratado:</b> R$ \${e.valorEmpresado.toFixed(2)}</p>
+              <p><b>Total do Débito:</b> R$ \${e.valorTotal.toFixed(2)}</p>
+              <p style="color:#27ae60;"><b>Valor da Parcela Diária:</b> R$ \${e.valorDiaria.toFixed(2)}</p>
+              <p><b>Data de Início:</b> \${e.dataInicio}</p>
+              <p style="color:#e74c3c;"><b>Data Limite para Quitação:</b> \${e.dataFinal}</p>
+            </div>
+          \`;
         });
       }
 
